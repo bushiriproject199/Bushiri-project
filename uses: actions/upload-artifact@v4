@@ -25,8 +25,13 @@ jobs:
         run: |
           arduino-cli compile --fqbn esp32:esp32:esp32 BushiriHotspot.ino
 
-      - name: Upload compiled .bin
+      - name: Show build files (DEBUG)
+        run: |
+          echo "==== LIST FILES ===="
+          find . -name "*.bin"
+
+      - name: Upload ALL bin files (SAFE)
         uses: actions/upload-artifact@v4
         with:
           name: bushiri-firmware
-          path: ./build/esp32/esp32/*/*.bin
+          path: "**/*.bin"
