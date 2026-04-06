@@ -19,6 +19,13 @@ app.post('/verify', (req, res) => {
   }
   // Tutaongeza logic hapa baadaye
   res.json({ success: true, message: 'Verified', mac, txid });
+});app.get('/heartbeat', (req, res) => {
+  res.json({
+    status: 'ok',
+    project: 'BUSHIRI',
+    version: '2.0.0',
+    time: new Date().toISOString()
+  });
 });
 
 const PORT = process.env.PORT || 3000;
