@@ -1,6 +1,6 @@
-name: Build ESP32
+name: 
 
-on:
+on:arduino-cli compile --fqbn esp32:esp32:esp32 .
   push:
     branches: [ main ]
   workflow_dispatch:
