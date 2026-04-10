@@ -1,6 +1,3 @@
-
-
-```javascript
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
@@ -10,206 +7,349 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Hifadhi ya muda - MAC zilizoidhinishwa na malipo
-const authorizedMACs = new Map();
-const pendingPayments = new Map();
+// ==================== HIFADHI YA MUDA ====================
+const pendingPayments = new Map(); // TXID → malipo
+const activeSessions = new Map();  // IP/identifier → session
 
-// ==================== ROUTES ====================
+// ==================== MUDA WA HUDUMA ====================
+// Uwiano: TZS 800 = Masaa 15
+// TZS 1600 = Masaa 30, TZS 2400 = Masaa 45, n.k.
 
-// Home
+function getDuration(amount) {
+  if (amount < 800) return null;
+  // Hesabu uwiano: (amount / 800) * 15 masaa
+  const hours = (amount / 800) * 15;
+  return Math.floor(hours * 60 * 60 * 1000); // milliseconds
+}
+
+function getDurationText(amount) {
+  if (amount < 800) return null;
+  const hours = (amount / 800) * 15;
+  const fullHours = Math.floor(hours);
+  const mins = Math.floor((hours - fullHours) * 60);
+  
+  if (fullHours >= 24) {
+    const days = Math.floor(fullHours / 24);
+    const remainHours = fullHours % 24;
+    if (remainHours > 0) {
+      return `Siku ${days} na masaa ${remainHours}! 🎉`;
+    }
+    return `Siku ${days} kamili! 🎉`;
+  }
+  if (mins > 0) {
+    return `Masaa ${fullHours} na dakika ${mins}! ✅`;
+  }
+  return `Masaa ${fullHours}! ✅`;
+}
+
+function getWelcomeMessage(amount) {
+  if (amount < 800) return null;
+  const hours = Math.floor((amount / 800) * 15);
+  
+  if (amount >= 4000) return `🌟 WOW! Umeweka TZS ${amount.toLocaleString()} - Unapata masaa ${hours} ya internet! Asante sana kwa uaminifu wako!`;
+  if (amount >= 2400) return `🚀 Hongera! TZS ${amount.toLocaleString()} = Masaa ${hours} ya internet yenye kasi! Furahia bila wasiwasi!`;
+  if (amount >= 1600) return `💪 Vizuri! TZS ${amount.toLocaleString()} = Masaa ${hours} ya internet! Karibu BUSHIRI HOTSPOT!`;
+  return `✅ Hongera! TZS ${amount.toLocaleString()} = Masaa ${hours} ya internet! Karibu sana - tunatumai utafurahia!`;
+}
+
+// ==================== HOME ====================
 app.get('/', (req, res) => {
-  res.json({ message: 'Bushiri Hotspot Backend inafanya kazi!' });
-});
-
-// Heartbeat - ESP32 inauliza kama VPS iko hai
-app.get('/heartbeat', (req, res) => {
-  res.json({
-    status: 'ok',
-    project: 'BUSHIRI',
-    version: '2.0.0',
-    time: new Date().toISOString(),
-    authorizedCount: authorizedMACs.size
+  res.json({ 
+    message: 'Bushiri Hotspot Backend inafanya kazi!',
+    version: '3.0.0'
   });
 });
 
-// SMS Callback - Africa's Talking inatuma SMS hapa
+// ==================== HEARTBEAT ====================
+app.get('/heartbeat', (req, res) => {
+  const now = Date.now();
+  
+  // Hesabu sessions zinazofanya kazi
+  let activeSessions_count = 0;
+  for (const [key, session] of activeSessions.entries()) {
+    if (now < session.expiry) {
+      activeSessions_count++;
+    } else {
+      activeSessions.delete(key); // Futa zilizokwisha
+    }
+  }
+
+  res.json({
+    status: 'ok',
+    project: 'BUSHIRI',
+    version: '3.0.0',
+    time: new Date().toISOString(),
+    activeSessions: activeSessions_count,
+    pendingPayments: pendingPayments.size
+  });
+});
+
+// ==================== SMS CALLBACK ====================
 app.post('/sms', (req, res) => {
   try {
-    const { from, text, date } = req.body;
-    console.log('SMS Imeingia:', { from, text, date });
-
-    // Angalia kama ni SMS ya M-Pesa
-    // Mfano wa SMS ya M-Pesa Tanzania:
-    // "Umetuma TZS 1,000 kwa BUSHIRI HOTSPOT. Nambari ya Muamala: ABC123456"
+    const from = req.body.from || req.body.sender || '';
+    const text = req.body.text || req.body.message || req.body.msg || '';
     
-    const smsText = text ? text.toUpperCase() : '';
-    
-    // Tafuta nambari ya muamala (Transaction ID)
-    // M-Pesa Tanzania format: herufi na namba
-    const txMatch = smsText.match(/([A-Z0-9]{8,12})/g);
-    const amountMatch = smsText.match(/TZS\s*([\d,]+)/i) || 
-                        smsText.match(/(\d[\d,]+)\s*TZS/i) ||
-                        smsText.match(/SHILINGI\s*([\d,]+)/i);
+    console.log('=== SMS IMEINGIA ===');
+    console.log('From:', from);
+    console.log('Text:', text);
 
-    if (txMatch && amountMatch) {
-      const txid = txMatch[0];
-      const amountStr = amountMatch[1].replace(/,/g, '');
-      const amount = parseInt(amountStr);
+    const smsUpper = text.toUpperCase();
+
+    // Pokea SMS kutoka M-PESA tu
+    const isFromMpesa = from.toUpperCase().includes('M-PESA') ||
+                        from.toUpperCase().includes('MPESA') ||
+                        from.toUpperCase().includes('VODACOM') ||
+                        from === 'M-PESA';
+
+    if (!isFromMpesa) {
+      console.log('SMS si kutoka M-PESA - inapuuzwa. From:', from);
+      return res.json({ success: true, ignored: true, reason: 'not_mpesa' });
+    }
+
+    // Puuza SMS za kutuma pesa
+    const isTuma = smsUpper.includes('UMEWEKA') || 
+                   smsUpper.includes('UMETUMA');
+    
+    if (isTuma) {
+      console.log('SMS ya kutuma pesa - INAPUUZWA');
+      return res.json({ success: true, ignored: true, reason: 'outgoing' });
+    }
+
+    // Pokea tu SMS za kupokea pesa
+    const isPokea = smsUpper.includes('UMEPOKEA') || 
+                    smsUpper.includes('UMELIPWA') ||
+                    smsUpper.includes('IMETHIBITISHWA');
+
+    if (!isPokea) {
+      console.log('SMS si ya kupokea pesa - INAPUUZWA');
+      return res.json({ success: true, ignored: true, reason: 'not_payment' });
+    }
+
+    // Tafuta TXID - ipo mwanzoni mwa SMS
+    // Format: "DD9L00GKXJ imethibitishwa. Umepokea..."
+    const txidMatch = text.match(/^([A-Z0-9]{8,12})\s+imethibitishwa/i) ||
+                      text.match(/([A-Z0-9]{8,12})\s+Imethibitishwa/i);
+
+    // Tafuta kiasi
+    const amountMatch = text.match(/Tshs?\s*([\d,]+\.?\d*)/i) ||
+                        text.match(/Tsh([\d,]+\.?\d*)/i);
+
+    if (!txidMatch) {
+      console.log('TXID haijapatikana kwenye SMS');
+      console.log('SMS yote:', text);
+      return res.json({ success: true, ignored: true, reason: 'no_txid' });
+    }
+
+    if (!amountMatch) {
+      console.log('Kiasi hakijapatikana kwenye SMS');
+      return res.json({ success: true, ignored: true, reason: 'no_amount' });
+    }
+
+    const txid = txidMatch[1].toUpperCase();
+    const amount = parseFloat(amountMatch[1].replace(/,/g, ''));
+
+    // Angalia kiasi - lazima iwe angalau 800
+    if (amount < 800) {
+      console.log('Kiasi kidogo mno:', amount, '- Inahitajika angalau TZS 800');
       
-      console.log('Malipo Yamegunduliwa:', { txid, amount, from });
-      
-      // Hifadhi malipo - yanasubiri ESP32 ithibitishe
+      // Hifadhi lakini weka flag ya kiasi kidogo
       pendingPayments.set(txid, {
         amount,
         from,
         date: new Date().toISOString(),
-        used: false
+        used: false,
+        tooSmall: true,
+        raw: text
       });
-
-      console.log('Malipo yamehifadhiwa. TXID:', txid, 'Kiasi:', amount);
-    } else {
-      console.log('SMS si ya M-Pesa au format haieleweki');
+      
+      return res.json({ success: true, tooSmall: true });
     }
 
-    res.json({ success: true });
+    console.log('✅ MALIPO YAMEGUNDULIWA!');
+    console.log('TXID:', txid);
+    console.log('Kiasi: TZS', amount);
+
+    // Hifadhi malipo
+    pendingPayments.set(txid, {
+      amount,
+      from,
+      date: new Date().toISOString(),
+      used: false,
+      tooSmall: false,
+      raw: text
+    });
+
+    console.log('Jumla ya malipo yanayosubiri:', pendingPayments.size);
+    res.json({ success: true, txid, amount });
+
   } catch (error) {
     console.error('SMS Error:', error);
-    res.status(500).json({ success: false });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Verify - ESP32 inauliza kama TXID ni halali
+// ==================== VERIFY ====================
 app.post('/verify', (req, res) => {
-  const { txid, mac, amount } = req.body;
-  
+  const { txid, mac } = req.body;
+
   if (!txid || !mac) {
-    return res.status(400).json({ 
-      success: false, 
-      message: 'Tuma txid na mac' 
+    return res.status(400).json({
+      success: false,
+      message: '⚠️ Tuma txid na mac'
     });
   }
 
-  console.log('Verify Request:', { txid, mac, amount });
+  const txidClean = txid.trim().toUpperCase();
+  console.log('Verify Request - TXID:', txidClean, '| ID:', mac);
 
-  // Angalia kama TXID ipo kwenye malipo yaliyopokelewa
-  const payment = pendingPayments.get(txid.toUpperCase());
-  
+  // Tafuta malipo
+  const payment = pendingPayments.get(txidClean);
+
   if (!payment) {
-    return res.json({ 
-      success: false, 
-      message: 'TXID haijapatikana - Subiri SMS au jaribu tena' 
+    return res.json({
+      success: false,
+      message: '❌ Namba hii ya muamala haijapatikana.\n\nHakikisha:\n1. Umenakili namba sahihi kutoka SMS\n2. Subiri sekunde 30 kisha jaribu tena'
     });
   }
 
   if (payment.used) {
-    return res.json({ 
-      success: false, 
-      message: 'TXID hii imetumika tayari' 
+    return res.json({
+      success: false,
+      message: '⚠️ Namba hii ya muamala imetumika tayari.\n\nKama una tatizo wasiliana nasi.'
     });
   }
 
-  // Angalia kiasi - lazima iwe angalau TZS 500
-  const minAmount = parseInt(process.env.MIN_AMOUNT) || 500;
-  if (payment.amount < minAmount) {
-    return res.json({ 
-      success: false, 
-      message: `Kiasi kidogo mno. Angalau TZS ${minAmount} inahitajika` 
+  if (payment.tooSmall) {
+    return res.json({
+      success: false,
+      message: `❌ Malipo yako ya TZS ${payment.amount} ni kidogo mno.\n\nBei ya chini ni TZS 800 kwa siku nzima.\n\nTuma tofauti na ujaribu tena.`
     });
   }
 
-  // Idhinisha MAC address
+  // Angalia kiasi tena
   const duration = getDuration(payment.amount);
-  const expiry = new Date(Date.now() + duration).toISOString();
-  
-  authorizedMACs.set(mac.toUpperCase(), {
-    txid,
+  if (!duration) {
+    return res.json({
+      success: false,
+      message: `❌ Kiasi cha TZS ${payment.amount} hakikidhi. Angalau TZS 800 inahitajika.`
+    });
+  }
+
+  // ✅ MALIPO YAMEKUBALIWA - Anza muda SASA HIVI
+  const now = Date.now();
+  const expiry = now + duration;
+  const expiryDate = new Date(expiry);
+
+  // Weka session - muda unaanza SASA
+  activeSessions.set(mac.toUpperCase(), {
+    txid: txidClean,
     amount: payment.amount,
-    expiry,
-    authorizedAt: new Date().toISOString()
+    startTime: now,
+    expiry: expiry,
+    expiryISO: expiryDate.toISOString()
   });
 
   // Weka TXID kama imetumika
   payment.used = true;
-  pendingPayments.set(txid.toUpperCase(), payment);
+  pendingPayments.set(txidClean, payment);
 
-  console.log('MAC Imeidhinishwa:', mac, 'Hadi:', expiry);
+  const welcomeMsg = getWelcomeMessage(payment.amount);
+  const durationText = getDurationText(payment.amount);
 
-  res.json({ 
-    success: true, 
-    message: 'Malipo yamethibitishwa! Karibu.',
-    mac,
+  console.log('✅ Session Imeundwa:', mac, '| Kiasi:', payment.amount, '| Inaisha:', expiryDate.toISOString());
+
+  res.json({
+    success: true,
+    message: welcomeMsg,
+    duration: durationText,
     amount: payment.amount,
-    expiry,
-    duration: getDurationText(payment.amount)
+    expiry: expiryDate.toISOString(),
+    expiryFormatted: expiryDate.toLocaleString('sw-TZ')
   });
 });
 
-// Check MAC - ESP32 inauliza kama MAC imeidhinishwa
+// ==================== CHECK SESSION ====================
 app.post('/check', (req, res) => {
   const { mac } = req.body;
-  
+
   if (!mac) {
     return res.status(400).json({ authorized: false });
   }
 
-  const auth = authorizedMACs.get(mac.toUpperCase());
-  
-  if (!auth) {
-    return res.json({ authorized: false, message: 'MAC haijaidhinishwa' });
+  const macClean = mac.toUpperCase();
+  const session = activeSessions.get(macClean);
+  const now = Date.now();
+
+  if (!session) {
+    return res.json({ 
+      authorized: false, 
+      message: 'Hakuna session - tafadhali lipa kwanza' 
+    });
   }
 
-  // Angalia kama muda haujaisha
-  if (new Date() > new Date(auth.expiry)) {
-    authorizedMACs.delete(mac.toUpperCase());
-    return res.json({ authorized: false, message: 'Muda wako umeisha' });
+  // Angalia muda
+  if (now >= session.expiry) {
+    // Muda umeisha - futa session
+    activeSessions.delete(macClean);
+    return res.json({ 
+      authorized: false, 
+      message: '⏰ Muda wako wa internet umeisha.\n\nAsante kwa kutumia BUSHIRI HOTSPOT!\nLipa tena kuendelea.' 
+    });
   }
 
-  res.json({ 
-    authorized: true, 
-    expiry: auth.expiry,
-    amount: auth.amount
+  // Bado ana muda - ruhusu
+  const remainingMs = session.expiry - now;
+  const remainingHours = Math.floor(remainingMs / 3600000);
+  const remainingMins = Math.floor((remainingMs % 3600000) / 60000);
+
+  res.json({
+    authorized: true,
+    remaining: `${remainingHours}h ${remainingMins}m`,
+    expiry: session.expiryISO,
+    amount: session.amount
   });
 });
 
-// Admin - Angalia hali ya system
+// ==================== ADMIN PANEL ====================
 app.get('/admin', (req, res) => {
   const token = req.headers['x-admin-token'] || req.query.token;
-  if (token !== process.env.ADMIN_PASSWORD) {
+  
+  if (token !== (process.env.ADMIN_PASSWORD || 'bushiri2026')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  const now = Date.now();
+  const activeList = [];
+  const expiredList = [];
+
+  for (const [mac, session] of activeSessions.entries()) {
+    const remainingMs = session.expiry - now;
+    if (remainingMs > 0) {
+      const hours = Math.floor(remainingMs / 3600000);
+      const mins = Math.floor((remainingMs % 3600000) / 60000);
+      activeList.push({
+        id: mac,
+        amount: session.amount,
+        remaining: `${hours}h ${mins}m`,
+        expiry: session.expiryISO
+      });
+    } else {
+      expiredList.push({ id: mac, expiry: session.expiryISO });
+      activeSessions.delete(mac);
+    }
+  }
+
   res.json({
-    authorizedMACs: Object.fromEntries(authorizedMACs),
-    pendingPayments: Object.fromEntries(pendingPayments),
-    totalAuthorized: authorizedMACs.size,
-    totalPayments: pendingPayments.size
+    activeSessions: activeList,
+    totalActive: activeList.length,
+    pendingPayments: pendingPayments.size,
+    timestamp: new Date().toISOString()
   });
 });
-
-// ==================== HELPER FUNCTIONS ====================
-
-// Panga muda kulingana na kiasi
-function getDuration(amount) {
-  if (amount >= 5000) return 30 * 24 * 60 * 60 * 1000; // Mwezi
-  if (amount >= 2000) return 7 * 24 * 60 * 60 * 1000;  // Wiki
-  if (amount >= 1000) return 24 * 60 * 60 * 1000;      // Siku
-  if (amount >= 500)  return 12 * 60 * 60 * 1000;      // Masaa 12
-  return 6 * 60 * 60 * 1000;                            // Masaa 6
-}
-
-function getDurationText(amount) {
-  if (amount >= 5000) return 'Mwezi mmoja';
-  if (amount >= 2000) return 'Wiki moja';
-  if (amount >= 1000) return 'Siku moja';
-  if (amount >= 500)  return 'Masaa 12';
-  return 'Masaa 6';
-}
 
 // ==================== SERVER ====================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Bushiri Backend inaendesha port ${PORT}`);
+  console.log(`🚀 Bushiri Backend inaendesha port ${PORT}`);
 });
-```
-
-Commit → Render 
