@@ -10,7 +10,7 @@ app.use(express.urlencoded({ extended: true }));
 // ==================== HIFADHI YA MUDA ====================
 const pendingPayments = new Map(); // TXID → malipo
 const activeSessions = new Map();  // IP/identifier → session
-
+const trialUsed = new Set(); // Hifadhi namba zilizotumia trial
 // ==================== MUDA WA HUDUMA ====================
 // Uwiano: TZS 800 = Masaa 15
 // TZS 1600 = Masaa 30, TZS 2400 = Masaa 45, n.k.
@@ -190,6 +190,46 @@ app.post('/sms', (req, res) => {
 });
 
 // ==================== VERIFY ====================
+// ==================== TRIAL / PROMO ====================
+if (txidClean === 'BUSHIRIPROJECT') {
+  
+  // Angalia kama namba hii imeshafaidika na trial
+  const phone = req.body.phone || mac;
+  
+  if (trialUsed.has(phone)) {
+    return res.json({
+      success: false,
+      message: '❌ Umeshafaidika na ofa hii.\n\nLipa TZS 800 kuendelea!'
+    });
+  }
+
+  // Ruhusu trial ya dakika 10
+  const trialDuration = 10 * 60 * 1000; // Dakika 10
+  const expiry = Date.now() + trialDuration;
+
+  activeSessions.set(mac.toUpperCase(), {
+    txid: 'BUSHIRIPROJECT',
+    amount: 0,
+    startTime: Date.now(),
+    expiry: expiry,
+    expiryISO: new Date(expiry).toISOString(),
+    isTrial: true
+  });
+
+  // Hifadhi namba iliyotumia trial
+  trialUsed.add(phone);
+  trialUsed.add(mac.toUpperCase());
+
+  console.log('Trial activated for:', mac, 'Phone:', phone);
+
+  return res.json({
+    success: true,
+    message: '🎁 Hongera! Umepata dakika 15 za BURE!\n\nKaribu BUSHIRI HOTSPOT!\nMuda ukiisha lipa TZS 800 kuendelea.',
+    duration: 'Dakika 15 za bure!',
+    isTrial: true,
+    expiry: new Date(expiry).toISOString()
+  });
+}
 app.post('/verify', (req, res) => {
   const { txid, mac } = req.body;
 
