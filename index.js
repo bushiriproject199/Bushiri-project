@@ -85,75 +85,46 @@ app.get('/heartbeat', (req, res) => {
 });
 
 // ==================== SMS CALLBACK ====================
-app.post('/sms', (req, res) => {
-  try {
-    const from = req.body.from || req.body.sender || '';
-    const text = req.body.text || req.body.message || req.body.msg || '';
-    
-    console.log('=== SMS IMEINGIA ===');
-    console.log('From:', from);
-    console.log('Text:', text);
-
-    const smsUpper = text.toUpperCase();
-
-    // Pokea SMS kutoka M-PESA tu
-    const isFromMpesa = from.toUpperCase().includes('M-PESA') ||
-                        from.toUpperCase().includes('MPESA') ||
-                        from.toUpperCase().includes('VODACOM') ||
-                        from === 'M-PESA';
-
-    if (!isFromMpesa) {
-      console.log('SMS si kutoka M-PESA - inapuuzwa. From:', from);
-      return res.json({ success: true, ignored: true, reason: 'not_mpesa' });
+     if (isTuma) {
+      console.log('SMS ya kutuma - INAPUUZWA');
+      return res.json({ success: true, ignored: true });
     }
 
-    // Puuza SMS za kutuma pesa
-    const isTuma = smsUpper.includes('UMEWEKA') || 
-                   smsUpper.includes('UMETUMA');
-    
-    if (isTuma) {
-      console.log('SMS ya kutuma pesa - INAPUUZWA');
-      return res.json({ success: true, ignored: true, reason: 'outgoing' });
-    }
-
-    // Pokea tu SMS za kupokea pesa
-    const isPokea = smsUpper.includes('UMEPOKEA') || 
-                    smsUpper.includes('UMELIPWA') ||
-                    smsUpper.includes('IMETHIBITISHWA');
+    // Pokea SMS za kupokea tu
+    const isPokea = smsUpper.includes('UMEPOKEA') ||
+                    smsUpper.includes('HAMISHO LA PESA LIMEKAMILIKA');
 
     if (!isPokea) {
-      console.log('SMS si ya kupokea pesa - INAPUUZWA');
-      return res.json({ success: true, ignored: true, reason: 'not_payment' });
+      console.log('SMS si ya kupokea - INAPUUZWA');
+      return res.json({ success: true, ignored: true });
     }
-
-    // Tafuta TXID - ipo mwanzoni mwa SMS
-    // Format: "DD9L00GKXJ imethibitishwa. Umepokea..."
-    const txidMatch = text.match(/^([A-Z0-9]{8,12})\s+imethibitishwa/i) ||
-                      text.match(/([A-Z0-9]{8,12})\s+Imethibitishwa/i);
 
     // Tafuta kiasi
-    const amountMatch = text.match(/Tshs?\s*([\d,]+\.?\d*)/i) ||
-                        text.match(/Tsh([\d,]+\.?\d*)/i);
+    // Format 1: "Umepokea TSh 2,000"
+    // Format 2: "Umepokea TSh 300 kutoka Airtel"
+    const amountMatch = text.match(/Umepokea\s+TSh\s+([\d,]+)/i);
 
-    if (!txidMatch) {
-      console.log('TXID haijapatikana kwenye SMS');
-      console.log('SMS yote:', text);
-      return res.json({ success: true, ignored: true, reason: 'no_txid' });
-    }
+    // Tafuta TXID
+    // Format 1: "Kumbukumbu no.: 26205921931320"
+    // Format 2: "kumbukumbu ya malipo.: 25492622118133"
+    const txidMatch = text.match(/Kumbukumbu\s+(?:no\.|ya\s+malipo\.?)\s*:?\s*(\d{10,20})/i);
 
     if (!amountMatch) {
-      console.log('Kiasi hakijapatikana kwenye SMS');
-      return res.json({ success: true, ignored: true, reason: 'no_amount' });
+      console.log('Kiasi hakijapatikana');
+      return res.json({ success: true, ignored: true });
     }
 
-    const txid = txidMatch[1].toUpperCase();
+    if (!txidMatch) {
+      console.log('TXID haijapatikana');
+      return res.json({ success: true, ignored: true });
+    }
+
+    const txid = txidMatch[1];
     const amount = parseFloat(amountMatch[1].replace(/,/g, ''));
 
     // Angalia kiasi - lazima iwe angalau 800
     if (amount < 800) {
-      console.log('Kiasi kidogo mno:', amount, '- Inahitajika angalau TZS 800');
-      
-      // Hifadhi lakini weka flag ya kiasi kidogo
+      console.log('Kiasi kidogo mno:', amount);
       pendingPayments.set(txid, {
         amount,
         from,
@@ -162,13 +133,12 @@ app.post('/sms', (req, res) => {
         tooSmall: true,
         raw: text
       });
-      
       return res.json({ success: true, tooSmall: true });
     }
 
     console.log('✅ MALIPO YAMEGUNDULIWA!');
     console.log('TXID:', txid);
-    console.log('Kiasi: TZS', amount);
+    console.log('Kiasi: TSh', amount);
 
     // Hifadhi malipo
     pendingPayments.set(txid, {
@@ -185,7 +155,7 @@ app.post('/sms', (req, res) => {
 
   } catch (error) {
     console.error('SMS Error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false });
   }
 });
 
